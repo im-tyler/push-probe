@@ -1,0 +1,55 @@
+/target/
+/.venv-tools/
+__pycache__/
+/artifacts/*
+!/artifacts/.gitkeep
+
+# User-supplied game/debug material must remain external.
+*.xex
+*.pdb
+*.xdb
+*.map
+*.i64
+*.id0
+*.id1
+*.nam
+*.til
+*.big
+*.rx2
+*.xsf
+*.vp6
+*.mus
+
+# Local machine configuration.
+.env
+release-secret.txt
+/dist/
+/config.json
+/online-config.json
+/local-paths.bat
+local.toml
+*.log
+
+# The dedicated server's private word list, wherever it is kept.
+badwords.txt
+
+# Local working notes, saves and game files: never published.
+/private-notes/
+/saves/
+/ROM/
+/.scratch/
+/diagnostics/
+/.as.txt
+/*-trace.txt
+/render-log.txt
+
+# Development launchers and compiled research tools: not part of the published source.
+/play-*.bat
+/run_game.bat
+/tools/*.exe
+
+# Decompiler output, native table extracts and old working patches stay local.
+/docs/evidence/*.txt
+/docs/evidence/*.json
+/docs/evidence/*.patch
+/docs/evidence/*.py

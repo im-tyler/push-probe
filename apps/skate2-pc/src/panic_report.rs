@@ -1,0 +1,98 @@
+//! PC fatal-panic diagnostics. Capture before unwinding poisons the SIM mutex;
+//! never clear that poison or attempt to continue the interrupted game state.
+
+use std::{
+    backtrace::Backtrace,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+static SIM_PANIC: OnceLock<String> = OnceLock::new();
+static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Install once at process startup, before any worker can panic. Resolving the
+/// save directory here avoids consulting profile/save locks inside the hook.
+pub(crate) fn install() {
+    let directory = skate2_core::edit_skater_profile::EditSkaterProfileStore::default_path()
+        .ok()
+        .and_then(|profile| profile.parent().map(|parent| parent.join("crash_reports")))
+        .and_then(|path| {
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                std::env::current_dir().ok().map(|root| root.join(path))
+            }
+        });
+    let executable = std::env::current_exe().ok();
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let reason = info.to_string();
+        let report = format!(
+            "Skate 2 PC panic\nVersion: {}\nExecutable: {}\nThread: {thread_name} ({:?})\n\n{reason}\n\nBacktrace (captured automatically):\n{}\n",
+            env!("CARGO_PKG_VERSION"),
+            executable
+                .as_deref()
+                .map_or_else(|| "<unknown>".into(), |path| path.display().to_string()),
+            thread.id(),
+            Backtrace::force_capture(),
+        );
+        let saved = write_report(directory.as_deref(), &report);
+        let destination = match &saved {
+            Ok(path) => format!("crash report: {}", path.display()),
+            Err(error) => format!("could not save crash report: {error}; see console backtrace"),
+        };
+        if thread_name == "sk8 SIM" {
+            // This hook runs before the slot guard is unwound, so a window
+            // thread that observes poison also sees the original failure.
+            let _ = SIM_PANIC.set(format!("SIM thread panicked: {reason}\n{destination}"));
+        }
+        {
+            // Best effort and independent of --quiet. Ignore a closed stderr
+            // rather than causing another panic from the reporting code.
+            let mut stderr = io::stderr().lock();
+            let _ = writeln!(stderr, "{destination}");
+            if saved.is_err() {
+                let _ = writeln!(stderr, "{report}");
+            }
+        }
+        previous_hook(info);
+    }));
+}
+
+fn write_report(directory: Option<&Path>, report: &str) -> io::Result<PathBuf> {
+    let directory = directory.ok_or_else(|| io::Error::other("save directory unavailable"))?;
+    fs::create_dir_all(directory)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = REPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = directory.join(format!(
+        "panic-{timestamp}-{}-{sequence}.txt",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(report.as_bytes())?;
+    file.sync_all()?;
+    Ok(path)
+}
+
+/// Used at every SIM slot lock/wait failure, retaining the panic reason instead
+/// of replacing it with the generic poisoned-lock message.
+pub(crate) fn sim_error() -> String {
+    SIM_PANIC
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "SIM state lock poisoned; panic details unavailable".into())
+}
